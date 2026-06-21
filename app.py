@@ -32,7 +32,7 @@ from . import astro
 GPS_VID = 0x7CAB
 GPS_PID = 0xBEAC
 
-FACES = ("analog", "digital", "sunmoon", "tide")
+FACES = ("analog", "digital", "sunmoon", "tide", "info")
 DOW = ("MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN")
 MON = ("JAN", "FEB", "MAR", "APR", "MAY", "JUN",
        "JUL", "AUG", "SEP", "OCT", "NOV", "DEC")
@@ -41,10 +41,17 @@ TIDE_PERIOD = 12 * 3600 + 25.2 * 60      # mean semidiurnal tide period (s)
 EA_BASE = "https://environment.data.gov.uk/flood-monitoring"
 EA_ATTRIB = "EA real-time data API (Beta)"
 
-# Indiglo-ish palette
-INDIGLO_BG = (0.10, 0.42, 0.40)
-INDIGLO_ON = (0.02, 0.10, 0.10)
-INDIGLO_OFF = (0.09, 0.36, 0.35)
+# Indiglo-ish palette (vivid blue-green backlight, dark LCD segments)
+INDIGLO_BG = (0.10, 0.62, 0.54)
+INDIGLO_ON = (0.00, 0.12, 0.12)
+INDIGLO_OFF = (0.09, 0.52, 0.46)
+
+# Edge-LED clock ring: hours purple, minutes blue, seconds white (values 0-255)
+LED_HOUR = (95, 0, 135)
+LED_MINUTE = (0, 25, 150)
+LED_BOTH = (70, 10, 150)
+LED_SECOND = (55, 55, 65)
+LED_OFFSET = -1         # rotate ring so position 0 is 12 o'clock
 
 # 7-segment lookup
 SEG = {
@@ -86,6 +93,70 @@ def _hhmm(h):
         return "--:--"
     h = h % 24
     return "%02d:%02d" % (int(h), int((h % 1) * 60))
+
+
+_DIM = (31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31)
+
+
+def _last_sunday(y, mo):
+    """Day-of-month of the last Sunday in the given month."""
+    dim = _DIM[mo - 1]
+    if mo == 2 and (y % 4 == 0 and (y % 100 != 0 or y % 400 == 0)):
+        dim = 29
+    dow = astro.jdn(y, mo, dim) % 7          # Mon=0 .. Sun=6
+    return dim - ((dow - 6) % 7)
+
+
+def is_eu_dst(t):
+    """EU/UK summer time: last Sun Mar 01:00 UTC .. last Sun Oct 01:00 UTC.
+    t is a UTC time tuple (year, month, day, hour, ...)."""
+    y, mo, d, h = t[0], t[1], t[2], t[3]
+    if mo < 3 or mo > 10:
+        return False
+    if 3 < mo < 10:
+        return True
+    ls = _last_sunday(y, mo)
+    if mo == 3:
+        return d > ls or (d == ls and h >= 1)
+    return d < ls or (d == ls and h < 1)
+
+
+def _nth_sunday(y, mo, n):
+    """Day-of-month of the nth Sunday of the month."""
+    dow1 = astro.jdn(y, mo, 1) % 7               # Mon=0 .. Sun=6
+    first = 1 + ((6 - dow1) % 7)
+    return first + (n - 1) * 7
+
+
+def is_us_dst(t):
+    """US daylight time: 2nd Sun Mar .. 1st Sun Nov (date-based)."""
+    y, mo, d = t[0], t[1], t[2]
+    if mo < 3 or mo > 11:
+        return False
+    if 3 < mo < 11:
+        return True
+    if mo == 3:
+        return d >= _nth_sunday(y, 3, 2)
+    return d < _nth_sunday(y, 11, 1)
+
+
+# Region presets: name -> (base UTC offset hours or None=auto-from-longitude, DST rule)
+REGIONS = (
+    ("UK / Eire", 0, "eu"),
+    ("Auto (GPS)", None, "eu"),
+    ("UTC", 0, None),
+    ("C. Europe", 1, "eu"),
+    ("E. Europe", 2, "eu"),
+    ("US Eastern", -5, "us"),
+    ("US Central", -6, "us"),
+    ("US Mountain", -7, "us"),
+    ("US Pacific", -8, "us"),
+    ("India", 5.5, None),
+    ("China", 8, None),
+    ("Japan", 9, None),
+    ("E. Australia", 10, None),
+)
+REGION_BY_NAME = {r[0]: (r[1], r[2]) for r in REGIONS}
 
 
 def draw_7seg(ctx, x, y, w, h, ch, on_col, off_col, lw):
@@ -152,7 +223,10 @@ class GPSClock(app.App):
 
     def __init__(self):
         self.button_states = Buttons(self)
-        self.face = FACES.index(_get("gpsclock_face", "analog")) if _get("gpsclock_face") in FACES else 0
+        saved = _get("gpsclock_face", "analog")
+        if saved not in FACES or saved == "info":   # never start on the Setup tile
+            saved = "analog"
+        self.face = FACES.index(saved)
 
         self.gps = None
         self._find_gps_module()
@@ -161,7 +235,12 @@ class GPSClock(app.App):
         self.lat = _get("gpsclock_lat")
         self.lon = _get("gpsclock_lon")
         self._last_sync = 0      # ticks since last RTC discipline
-        self._have_gps_time = False
+        self._time_src = None    # None / "gps" / "net"
+        self._net_ms = 0         # 0 = never attempted (ticks_ms once attempted)
+        self._dst_on = False
+        self._tz_base = 0
+        self._editing = False    # SETUP tile edit mode
+        self._sel = 0            # selected menu item
 
         # tide online state
         self._tide = None        # dict: value, units, trend, ... or None
@@ -169,11 +248,17 @@ class GPSClock(app.App):
         self._tide_station = _get("gpsclock_tide_station")
 
         # LEDs
-        self._led_sec = -1
+        self._led_hm = None
 
         eventbus.on_async(RequestForegroundPushEvent, self._resume, self)
         eventbus.on_async(RequestForegroundPopEvent, self._pause, self)
         eventbus.on_async(HexpansionMountedEvent, self._mounted, self)
+        try:
+            from system.hexpansion.events import HexpansionUnmountedEvent
+            eventbus.on_async(HexpansionUnmountedEvent, self._unmounted, self)
+        except ImportError:
+            from system.hexpansion.events import HexpansionRemovalEvent
+            eventbus.on_async(HexpansionRemovalEvent, self._unmounted, self)
         eventbus.emit(PatternDisable())
 
     def _find_gps_module(self):
@@ -183,7 +268,7 @@ class GPSClock(app.App):
 
     async def _resume(self, _):
         eventbus.emit(PatternDisable())
-        self._led_sec = -1
+        self._led_hm = None
 
     async def _pause(self, _):
         self._leds_off()
@@ -193,14 +278,27 @@ class GPSClock(app.App):
         if not self.gps:
             self._find_gps_module()
 
+    async def _unmounted(self, e):
+        if self.gps and getattr(e, "port", None) == self.gps.config.port:
+            self.gps = None
+            if self._time_src == "gps":
+                self._time_src = None      # GPS gone -> let NTP take over
+
     # --- settings helpers -------------------------------------------------
 
     def _offset_seconds(self):
-        off = _get("gpsclock_utc_offset")
-        if off is None:
-            off = round(self.lon / 15.0) if self.lon is not None else 0
-        dst = 1 if _get("gpsclock_dst", False) else 0
-        return int((off + dst) * 3600)
+        base, rule = REGION_BY_NAME.get(_get("gpsclock_region", REGIONS[0][0]),
+                                        (None, "eu"))
+        if base is None:
+            base = round(self.lon / 15.0) if self.lon is not None else 0
+        dst = 0
+        if rule == "eu" and is_eu_dst(self._now_utc()):
+            dst = 1
+        elif rule == "us" and is_us_dst(self._now_utc()):
+            dst = 1
+        self._dst_on = bool(dst)
+        self._tz_base = base
+        return int((base + dst) * 3600)
 
     def _now_utc(self):
         return time.localtime(time.time())        # RTC held in UTC
@@ -227,7 +325,7 @@ class GPSClock(app.App):
             return
         t = self._parse_rmc_time(sentences)
         if t:
-            self._have_gps_time = True
+            self._time_src = "gps"
             self._discipline_rtc(t)
 
     def _parse_rmc_time(self, sentences):
@@ -259,55 +357,86 @@ class GPSClock(app.App):
     # --- update -----------------------------------------------------------
 
     def update(self, delta):
-        if self.button_states.get(BUTTON_TYPES["CANCEL"]):
-            self.button_states.clear()
-            self._leds_off()
-            self.minimise()
-            return
-        if self.button_states.get(BUTTON_TYPES["RIGHT"]):
-            self.face = (self.face + 1) % len(FACES)
-            _set("gpsclock_face", FACES[self.face])
-            self.button_states.clear()
-        if self.button_states.get(BUTTON_TYPES["LEFT"]):
-            self.face = (self.face - 1) % len(FACES)
-            _set("gpsclock_face", FACES[self.face])
-            self.button_states.clear()
-        if self.button_states.get(BUTTON_TYPES["UP"]):
-            self._adjust_offset(1)
-            self.button_states.clear()
-        if self.button_states.get(BUTTON_TYPES["DOWN"]):
-            self._adjust_offset(-1)
-            self.button_states.clear()
-        if self.button_states.get(BUTTON_TYPES["CONFIRM"]):
-            self._confirm_action()
-            self.button_states.clear()
+        b = self.button_states
+        if b.get(BUTTON_TYPES["CANCEL"]):
+            b.clear()
+            if self._editing:
+                self._editing = False            # leave the settings menu
+            else:
+                self._leds_off()
+                self.minimise()
+                return
+
+        if self._editing:
+            # Settings menu: Up/Down pick item, Left/Right change value, OK done
+            n = len(self._menu_items())
+            if b.get(BUTTON_TYPES["UP"]):
+                self._sel = (self._sel - 1) % n; b.clear()
+            if b.get(BUTTON_TYPES["DOWN"]):
+                self._sel = (self._sel + 1) % n; b.clear()
+            if b.get(BUTTON_TYPES["LEFT"]):
+                self._menu_change(-1); b.clear()
+            if b.get(BUTTON_TYPES["RIGHT"]):
+                self._menu_change(1); b.clear()
+            if b.get(BUTTON_TYPES["CONFIRM"]):
+                self._editing = False; b.clear()
+        else:
+            # Browsing: Left/Right change face
+            if b.get(BUTTON_TYPES["RIGHT"]):
+                self.face = (self.face + 1) % len(FACES)
+                self._save_face(); b.clear()
+            if b.get(BUTTON_TYPES["LEFT"]):
+                self.face = (self.face - 1) % len(FACES)
+                self._save_face(); b.clear()
+            if b.get(BUTTON_TYPES["CONFIRM"]):
+                if FACES[self.face] == "info":
+                    self._editing = True; self._sel = 0
+                elif FACES[self.face] == "tide":
+                    _set("gpsclock_tide_anchor", int(time.time()))
+                b.clear()
 
         self._read_gps()
         self._update_leds()
 
-    def _adjust_offset(self, d):
-        off = _get("gpsclock_utc_offset")
-        if off is None:
-            off = round(self.lon / 15.0) if self.lon is not None else 0
-        _set("gpsclock_utc_offset", max(-12, min(14, off + d)))
+    def _menu_items(self):
+        """Editable settings: (key, label, options, current_value)."""
+        return [
+            ("gpsclock_region", "Zone", [r[0] for r in REGIONS],
+             _get("gpsclock_region", REGIONS[0][0])),
+            ("gpsclock_tide_provider", "Tide", ["auto", "offline"],
+             _get("gpsclock_tide_provider", "auto")),
+        ]
 
-    def _confirm_action(self):
-        if FACES[self.face] == "tide":
-            # Calibrate the offline tide-clock: "it is high tide now"
-            _set("gpsclock_tide_anchor", int(time.time()))
-        else:
-            _set("gpsclock_dst", not _get("gpsclock_dst", False))
+    def _menu_change(self, delta):
+        key, label, opts, cur = self._menu_items()[self._sel]
+        i = opts.index(cur) if cur in opts else 0
+        _set(key, opts[(i + delta) % len(opts)])   # apply immediately and persist
+
+    def _save_face(self):
+        if FACES[self.face] != "info":      # never persist the Setup tile
+            _set("gpsclock_face", FACES[self.face])
 
     def _update_leds(self):
         lt = self._now_local()
-        sec = lt[5]
-        led = int(sec / 5) % 12
-        if led == self._led_sec:
+        hpos = lt[3] % 12                   # hour hand position (0-11)
+        mpos = (lt[4] // 5) % 12            # minute hand position (5-min steps)
+        spos = (lt[5] // 5) % 12            # second hand position (5-sec steps)
+        if (hpos, mpos, spos) == self._led_hm:
             return
-        self._led_sec = led
+        self._led_hm = (hpos, mpos, spos)
         try:
-            for i in range(12):
-                tildagonos.leds[i + 1] = (40, 40, 50) if i == led else (0, 0, 0)
+            for p in range(12):
+                if p == hpos and p == mpos:
+                    c = LED_BOTH
+                elif p == hpos:
+                    c = LED_HOUR
+                elif p == mpos:
+                    c = LED_MINUTE
+                elif p == spos:
+                    c = LED_SECOND
+                else:
+                    c = (0, 0, 0)
+                tildagonos.leds[((p + LED_OFFSET) % 12) + 1] = c
             tildagonos.leds.write()
         except Exception:
             pass
@@ -319,7 +448,7 @@ class GPSClock(app.App):
             tildagonos.leds.write()
         except Exception:
             pass
-        self._led_sec = -1
+        self._led_hm = None
 
     # --- draw -------------------------------------------------------------
 
@@ -332,17 +461,24 @@ class GPSClock(app.App):
             self._draw_digital(ctx)
         elif f == "sunmoon":
             self._draw_sunmoon(ctx)
-        else:
+        elif f == "tide":
             self._draw_tide(ctx)
+        else:
+            self._draw_info(ctx)
         self._draw_gps_pip(ctx)
 
     def _draw_gps_pip(self, ctx):
         ctx.save()
-        ok = self._have_gps_time
-        ctx.rgb(*(0.0, 0.8, 0.3) if ok else (0.5, 0.5, 0.5))
-        ctx.begin_path()
-        ctx.arc(0, 112, 3, 0, 2 * math.pi, False)
-        ctx.fill()
+        if self._time_src == "gps":
+            col = (0.0, 1.0, 0.25)        # bright green = GPS time lock
+        elif self._time_src == "net":
+            col = (0.1, 0.75, 1.0)        # cyan = NTP network time
+        else:
+            col = (0.45, 0.45, 0.45)      # grey = RTC only
+        ctx.rgba(col[0], col[1], col[2], 0.35)
+        ctx.begin_path(); ctx.arc(0, -108, 9, 0, 2 * math.pi, False); ctx.fill()
+        ctx.rgb(*col)
+        ctx.begin_path(); ctx.arc(0, -108, 5.5, 0, 2 * math.pi, False); ctx.fill()
         ctx.restore()
 
     # --- analog face ------------------------------------------------------
@@ -488,64 +624,194 @@ class GPSClock(app.App):
         ctx.text_align = ctx.CENTER; ctx.text_baseline = ctx.MIDDLE
         anchor = _get("gpsclock_tide_anchor")
         online = self._tide
+        if online and online.get("last_high"):
+            anchor = online["last_high"]      # auto-calibrate from EA data
 
-        # dial
-        ctx.rgb(0.10, 0.20, 0.30)
-        ctx.begin_path(); ctx.arc(0, 0, 96, 0, 2 * math.pi, False); ctx.fill()
-        ctx.rgb(0.5, 0.7, 0.9); ctx.line_width = 2
-        ctx.begin_path(); ctx.arc(0, 0, 96, 0, 2 * math.pi, False); ctx.stroke()
-        ctx.rgb(0.8, 0.9, 1.0); ctx.font_size = 14
-        ctx.move_to(0, -80).text("HIGH")
-        ctx.move_to(0, 80).text("LOW")
+        # sky
+        ctx.rgb(0.05, 0.09, 0.17)
+        ctx.begin_path(); ctx.arc(0, 0, 118, 0, 2 * math.pi, False); ctx.fill()
 
         if anchor is None and online is None:
-            ctx.rgb(0.9, 0.9, 0.7); ctx.font_size = 15
-            ctx.move_to(0, -20).text("Press OK at")
-            ctx.move_to(0, 2).text("high tide to")
-            ctx.move_to(0, 24).text("calibrate")
+            ctx.rgb(0.9, 0.9, 0.7); ctx.font_size = 17
+            ctx.move_to(0, -10).text("Press OK")
+            ctx.move_to(0, 14).text("at high tide")
             ctx.restore(); return
 
         now = time.time()
-        # auto-calibrate from online last-high if available
-        if online and online.get("last_high"):
-            anchor = online["last_high"]
         if anchor is None:
-            anchor = now            # not calibrated; assume high now
+            anchor = now
+        T = TIDE_PERIOD
+        elapsed = (now - anchor) % T
+        phase = elapsed / T
+        y0, amp = 22, 44
 
-        phase = ((now - anchor) % TIDE_PERIOD) / TIDE_PERIOD   # 0=high .. .5=low
-        ang = phase * 2 * math.pi
-        # pointer
-        ctx.rgb(0.95, 0.85, 0.2); ctx.line_width = 4
-        ctx.begin_path(); ctx.move_to(0, 0)
-        ctx.line_to(math.sin(ang) * 80, -math.cos(ang) * 80); ctx.stroke()
-        ctx.rgb(0.95, 0.85, 0.2)
-        ctx.begin_path(); ctx.arc(0, 0, 5, 0, 2 * math.pi, False); ctx.fill()
+        def hgt(dt):
+            return math.cos(2 * math.pi * (elapsed + dt) / T)
+
+        # tide curve as a wave, one full cycle across the screen
+        pts = []
+        x = -112
+        while x <= 112:
+            dt = (x / 112.0) * (T / 2.0)
+            pts.append((x, y0 - amp * hgt(dt)))
+            x += 4
+        # water fill below the surface
+        ctx.rgb(0.10, 0.40, 0.62)
+        ctx.begin_path(); ctx.move_to(pts[0][0], pts[0][1])
+        for px, py in pts[1:]:
+            ctx.line_to(px, py)
+        ctx.line_to(120, 120); ctx.line_to(-120, 120); ctx.close_path(); ctx.fill()
+        # surface line
+        ctx.rgb(0.62, 0.86, 1.0); ctx.line_width = 2
+        ctx.begin_path(); ctx.move_to(pts[0][0], pts[0][1])
+        for px, py in pts[1:]:
+            ctx.line_to(px, py)
+        ctx.stroke()
+        # "now" marker
+        ny = y0 - amp * hgt(0)
+        ctx.rgba(1, 1, 1, 0.5); ctx.line_width = 1
+        ctx.begin_path(); ctx.move_to(0, ny); ctx.line_to(0, 116); ctx.stroke()
+        ctx.rgb(1.0, 0.85, 0.2)
+        ctx.begin_path(); ctx.arc(0, ny, 5, 0, 2 * math.pi, False); ctx.fill()
 
         rising = phase > 0.5
-        to_high = (1 - phase) % 1 * TIDE_PERIOD
-        to_low = (0.5 - phase) % 1 * TIDE_PERIOD
-        ctx.font_size = 16; ctx.rgb(0.9, 0.95, 1.0)
-        ctx.move_to(0, 30).text("Rising" if rising else "Falling")
+        to_high = (1 - phase) % 1 * T
+        to_low = (0.5 - phase) % 1 * T
         nxt = to_high if rising else to_low
+        ctx.rgb(0.95, 1.0, 1.0); ctx.font_size = 20
+        ctx.move_to(0, -92).text("Rising" if rising else "Falling")
         ctx.font_size = 14; ctx.rgb(0.75, 0.85, 0.95)
-        ctx.move_to(0, 50).text("%s in %dh%02dm" % ("HIGH" if rising else "LOW",
+        ctx.move_to(0, -72).text("%s in %dh%02dm" % ("HIGH" if rising else "LOW",
                                                      int(nxt // 3600), int((nxt % 3600) // 60)))
         if online and online.get("value") is not None:
-            ctx.font_size = 15; ctx.rgb(0.6, 1.0, 0.8)
-            ctx.move_to(0, -40).text("%.2f%s" % (online["value"], online.get("units", "m")))
-            ctx.font_size = 10; ctx.rgb(0.5, 0.6, 0.7)
-            ctx.move_to(0, 92).text(EA_ATTRIB)
+            ctx.font_size = 16; ctx.rgb(0.5, 1.0, 0.75)
+            ctx.move_to(0, 96).text("%.2f%s" % (online["value"], online.get("units", "m")))
+            ctx.font_size = 9; ctx.rgb(0.45, 0.55, 0.65)
+            ctx.move_to(0, 110).text(EA_ATTRIB)
         ctx.restore()
 
+
+    # --- setup / info tile ------------------------------------------------
+
+    def _draw_info(self, ctx):
+        ctx.save()
+        ctx.text_align = ctx.CENTER; ctx.text_baseline = ctx.MIDDLE
+        ctx.rgb(0.8, 0.85, 1.0); ctx.font_size = 18
+        ctx.move_to(0, -96).text("SETUP")
+
+        oh = self._offset_seconds() / 3600.0
+        src = {"gps": "GPS", "net": "NTP"}.get(self._time_src, "RTC")
+        srccol = {"gps": (0.2, 1.0, 0.4), "net": (0.3, 0.8, 1.0)}.get(
+            self._time_src, (0.65, 0.65, 0.65))
+        if self._dst_on:
+            tz = "UTC%+g BST" % oh if oh == 1 else "UTC%+g DST" % oh
+        else:
+            tz = "UTC%+g" % oh
+        loc = "%.2f,%.2f" % (self.lat, self.lon) if self.lat is not None else "no fix"
+
+        wifi_up = self._wifi_connected()
+        wifi = "up" if wifi_up else "off"
+        wcol = (0.2, 1.0, 0.4) if wifi_up else (0.6, 0.6, 0.6)
+        if self.gps is None:
+            gstat, gcol = "none", (0.6, 0.6, 0.6)
+        elif getattr(self.gps, "position", None):
+            gstat, gcol = "fix", (0.2, 1.0, 0.4)
+        else:
+            gstat, gcol = "no fix", (1.0, 0.7, 0.0)
+
+        # read-only status
+        ctx.font_size = 14
+        y = -78
+        for label, val, col in (("Time", src, srccol),
+                                ("WiFi", wifi, wcol),
+                                ("GPS", gstat, gcol),
+                                ("Offset", tz, (0.9, 0.9, 0.9)),
+                                ("Loc", loc, (0.82, 0.82, 0.86))):
+            ctx.text_align = ctx.LEFT
+            ctx.rgb(0.5, 0.6, 0.8).move_to(-82, y).text(label)
+            ctx.text_align = ctx.RIGHT
+            ctx.rgb(*col).move_to(82, y).text(val)
+            y += 18
+
+        # editable settings (cursor while editing)
+        items = self._menu_items()
+        y = 16
+        for idx, (key, label, opts, cur) in enumerate(items):
+            sel = self._editing and idx == self._sel
+            if sel:
+                ctx.rgb(0.16, 0.26, 0.42)
+                ctx.rectangle(-94, y - 13, 188, 26).fill()
+            ctx.text_align = ctx.LEFT
+            ctx.rgb(0.65, 0.8, 1.0).move_to(-78, y).text(label)
+            ctx.text_align = ctx.RIGHT
+            ctx.rgb(*((1.0, 0.95, 0.4) if sel else (0.92, 0.92, 0.92)))
+            ctx.move_to(78, y).text(str(cur))
+            if sel:
+                ctx.text_align = ctx.LEFT; ctx.rgb(1.0, 0.95, 0.4)
+                ctx.move_to(-92, y).text("<")
+                ctx.text_align = ctx.RIGHT
+                ctx.move_to(92, y).text(">")
+            y += 28
+
+        ctx.text_align = ctx.CENTER; ctx.font_size = 11; ctx.rgb(0.55, 0.6, 0.7)
+        if self._editing:
+            ctx.move_to(0, 94).text("Up/Dn pick   L/R change   OK done")
+        else:
+            ctx.move_to(0, 94).text("OK to edit")
+        ctx.restore()
 
     # --- online tide (EA flood-monitoring, UK; best-effort) ---------------
 
     async def background_task(self):
+        # The scheduler runs this for every app. Pulls NTP time (when there's no
+        # GPS) and UK tide data.
         import asyncio
+        await asyncio.sleep_ms(400)
         while True:
-            await asyncio.sleep(5)
+            try:
+                await self._maybe_net_time()
+            except Exception:
+                pass
             try:
                 await self._maybe_fetch_tide()
+            except Exception:
+                pass
+            await asyncio.sleep(5)
+
+    @staticmethod
+    def _wifi_connected():
+        # Cheap, non-blocking check so we never stall on DNS/connect when offline.
+        try:
+            import network
+            return network.WLAN(network.STA_IF).isconnected()
+        except Exception:
+            return False
+
+    async def _maybe_net_time(self):
+        # Use NTP when GPS time isn't available and WiFi is already up. GPS, if
+        # present, always wins (it keeps disciplining the RTC in _read_gps).
+        if self._time_src == "gps":
+            return
+        if not self._wifi_connected():
+            return
+        # retry ~every 60 s until we have time, then re-sync hourly
+        if self._net_ms != 0:
+            period = 60 * 60 * 1000 if self._time_src == "net" else 60 * 1000
+            if time.ticks_diff(time.ticks_ms(), self._net_ms) < period:
+                return
+        self._net_ms = time.ticks_ms()
+        try:
+            import ntptime
+            import async_helpers
+            await async_helpers.unblock(ntptime.settime)   # off the UI loop
+            if self._time_src != "gps":
+                self._time_src = "net"
+        except Exception:
+            try:
+                import ntptime
+                ntptime.settime()                          # brief, WiFi is up
+                if self._time_src != "gps":
+                    self._time_src = "net"
             except Exception:
                 pass
 
@@ -557,14 +823,16 @@ class GPSClock(app.App):
         # EA coverage is UK only
         if not (49.0 < self.lat < 61.0 and -11.0 < self.lon < 2.5):
             return
+        if not self._wifi_connected():
+            return
+        self._tide_fetch_ms = time.ticks_ms()
         try:
             import async_helpers
             data = await async_helpers.unblock(self._fetch_tide_blocking)
         except Exception:
-            data = self._fetch_tide_blocking()
+            data = None
         if data:
             self._tide = data
-        self._tide_fetch_ms = time.ticks_ms()
 
     def _fetch_tide_blocking(self):
         try:

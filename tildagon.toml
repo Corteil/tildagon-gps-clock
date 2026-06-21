@@ -24,4 +24,4 @@ url = "https://github.com/Corteil/tildagon-gps-clock"
 description = "Retro GPS watch — analog, digital, sun/moon and tide faces for the round display, using the GPS Hexpansion."
 
 # Version number of your app.  Must be an integer!
-version = "1"
+version = "2"

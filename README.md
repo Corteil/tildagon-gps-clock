@@ -5,22 +5,28 @@ driven by the GPS Hexpansion and designed for the round display.
 
 ## Faces
 
-Cycle with **Left / Right**:
+Cycle with **Left / Right** (it remembers the last clock face you used):
 
 1. **Analog** — classic round dial with hour/minute/second hands and a date window.
 2. **Digital** — retro Indiglo-style 7-segment LCD: `HH:MM`, seconds, day + date.
 3. **Sun/Moon** — sunrise & sunset (local), day length, and the moon phase drawn
    with the correct illuminated fraction.
-4. **Tide** — a tide-clock dial showing rising/falling and time to the next high/low.
-   Offline by default; in the UK it shows **real water levels** from the
-   Environment Agency when WiFi is available.
+4. **Tide** — a **graphical tide wave** showing the water level, rising/falling and
+   time to the next high/low. Offline by default; in the UK it shows **real water
+   levels** from the Environment Agency when WiFi is available.
+5. **Setup** — status (time source, WiFi, GPS, offset, location) and editable
+   settings (timezone region, tide source).
+
+The 12 edge **LEDs** show the time as a clock: **purple = hour**, **blue = minute**,
+**white = second**.
 
 ## How it works
 
-* **Time:** parsed from the GPS `$..RMC` sentence (via the Hexpansion firmware's
-  `sentences` property) and used to discipline the badge RTC, so the clock keeps
-  good time even without a fix. Local time = a manual **UTC offset + DST toggle**
-  (defaulting to a rough estimate from GPS longitude).
+* **Time:** taken from GPS (`$..RMC`, via the Hexpansion firmware's `sentences`
+  property) when there's a fix; otherwise from **NTP** when WiFi is up; otherwise
+  the badge RTC. Whichever is available disciplines the RTC so the clock keeps
+  running. Local time comes from the selected **timezone region** with automatic
+  **UK/EU and US daylight-saving**.
 * **Location:** taken from the GPS fix and cached, so sun/moon/tide keep working
   offline at your last known position.
 * **Tide (offline):** a classic tide-clock (12 h 25 m cycle) you calibrate once by
@@ -29,14 +35,16 @@ Cycle with **Left / Right**:
   is queried for live water level + trend, which also auto-calibrates the offline
   clock. Uses the EA real-time data API (Beta) — Open Government Licence; no key.
   *"this uses Environment Agency tide gauge data from the real-time data API (Beta)"*
+* **Settings** persist across power-off.
 
 ## Controls
 
 * **Left / Right** — change face.
-* **Up / Down** — adjust UTC offset.
-* **OK / Confirm** — on the Tide face, "set high tide now" (calibrate); on clock
-  faces, toggle DST.
 * **F / Cancel** — exit.
+* **OK / Confirm** — on the **Tide** face, "set high tide now" (calibrate); on the
+  **Setup** tile, enter/leave edit mode.
+* **In the Setup menu:** **Up/Down** pick a setting, **Left/Right** change its value,
+  **OK** done.
 
 ## Requirements
 
