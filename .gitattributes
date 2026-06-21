@@ -1,0 +1,4 @@
+# Keep the on-badge app-store tarball to just the app code.
+README.md export-ignore
+.gitignore export-ignore
+.gitattributes export-ignore
