@@ -19,10 +19,11 @@ Cycle with **Left / Right** (it remembers the last clock face you used):
    mark for the way you point, and the heading), with a bubble level while the
    badge lies flat. Without a compass it stays North-up.
 6. **Setup** — status (time source, WiFi, GPS, offset, location) and editable
-   settings (timezone region, tide source, north trim).
+   settings (timezone region, tide source, north trim, status ring on/off).
 
 A thin **status ring** round the edge of the display shows the time source:
-**green** = GPS, **cyan** = NTP, **grey** = badge RTC only.
+**green** = GPS, **cyan** = NTP, **grey** = badge RTC only. Turn it off with
+**Ring** in Setup.
 
 Stand the badge on any edge and every face turns so its bottom stays level
 (the LED clock turns with it).

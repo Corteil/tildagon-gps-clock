@@ -470,6 +470,7 @@ class GPSClock(app.App):
              _get("gpsclock_tide_provider", "auto")),
             (orient.TRIM_KEY, "N trim", list(range(-orient.TRIM_MAX, orient.TRIM_MAX + 1)),
              self.orient.trim),
+            ("gpsclock_ring", "Ring", ["on", "off"], _get("gpsclock_ring", "on")),
         ]
 
     def _menu_change(self, delta):
@@ -528,7 +529,8 @@ class GPSClock(app.App):
         ctx.rotate(self.orient.rotation)         # keep the bottom level on an edge
         self._draw_face(ctx)
         ctx.restore()
-        self._draw_status_ring(ctx)
+        if _get("gpsclock_ring", "on") == "on":
+            self._draw_status_ring(ctx)
 
     def _draw_face(self, ctx):
         if self.orient.calibrating:
@@ -839,8 +841,8 @@ class GPSClock(app.App):
             ctx.begin_path(); ctx.arc(x, y, 4 + min(4.0, snr / 12.0), 0, 2 * math.pi, False); ctx.fill()
 
         ctx.font_size = 16; ctx.rgb(1, 1, 1)
-        if o.compass_ready:
-            ctx.move_to(0, -80).text("%03d°" % (int(o.heading + 0.5) % 360))
+        if o.compass_ready:                       # below the lubber mark
+            ctx.move_to(0, -SKY_R + 24).text("%03d°" % (int(o.heading + 0.5) % 360))
         if self.gps is None:
             msg = "no GPS"
         else:
@@ -875,7 +877,7 @@ class GPSClock(app.App):
     def _draw_info(self, ctx):
         ctx.save()
         ctx.text_align = ctx.CENTER; ctx.text_baseline = ctx.MIDDLE
-        ctx.rgb(0.8, 0.85, 1.0); ctx.font_size = 18
+        ctx.rgb(0.8, 0.85, 1.0); ctx.font_size = 16
         ctx.move_to(0, -96).text("SETUP")
 
         oh = self._offset_seconds() / 3600.0
@@ -899,7 +901,7 @@ class GPSClock(app.App):
             gstat, gcol = "no fix", (1.0, 0.7, 0.0)
 
         # read-only status
-        ctx.font_size = 14
+        ctx.font_size = 13
         y = -78
         for label, val, col in (("Time", src, srccol),
                                 ("WiFi", wifi, wcol),
@@ -907,36 +909,39 @@ class GPSClock(app.App):
                                 ("Offset", tz, (0.9, 0.9, 0.9)),
                                 ("Loc", loc, (0.82, 0.82, 0.86))):
             ctx.text_align = ctx.LEFT
-            ctx.rgb(0.5, 0.6, 0.8).move_to(-72, y).text(label)
+            ctx.rgb(0.5, 0.6, 0.8).move_to(-66, y).text(label)
             ctx.text_align = ctx.RIGHT
-            ctx.rgb(*col).move_to(72, y).text(val)
-            y += 18
+            ctx.rgb(*col).move_to(66, y).text(val)
+            y += 16
 
         # editable settings (cursor while editing)
         items = self._menu_items()
-        y = 14
+        ctx.font_size = 14
+        y = 4
         for idx, (key, label, opts, cur) in enumerate(items):
             sel = self._editing and idx == self._sel
+            # row width follows the round screen, inside the status ring
+            half = min(80, math.sqrt(108 * 108 - (abs(y) + 11) ** 2))
             if sel:
                 ctx.rgb(0.16, 0.26, 0.42)
-                ctx.rectangle(-80, y - 12, 160, 24).fill()
+                ctx.rectangle(-half, y - 11, 2 * half, 22).fill()
             ctx.text_align = ctx.LEFT
-            ctx.rgb(0.65, 0.8, 1.0).move_to(-78, y).text(label)
+            ctx.rgb(0.65, 0.8, 1.0).move_to(-half + 14, y).text(label)
             ctx.text_align = ctx.RIGHT
             ctx.rgb(*((1.0, 0.95, 0.4) if sel else (0.92, 0.92, 0.92)))
-            ctx.move_to(78, y).text("%+d°" % cur if key == orient.TRIM_KEY else str(cur))
+            ctx.move_to(half - 14, y).text("%+d°" % cur if key == orient.TRIM_KEY else str(cur))
             if sel:
                 ctx.text_align = ctx.LEFT; ctx.rgb(1.0, 0.95, 0.4)
-                ctx.move_to(-84, y).text("<")
+                ctx.move_to(-half + 2, y).text("<")
                 ctx.text_align = ctx.RIGHT
-                ctx.move_to(84, y).text(">")
-            y += 25
+                ctx.move_to(half - 2, y).text(">")
+            y += 23
 
         ctx.text_align = ctx.CENTER; ctx.font_size = 11; ctx.rgb(0.55, 0.6, 0.7)
         if self._editing:
-            ctx.move_to(0, 94).text("U/D pick  L/R set  OK")
+            ctx.move_to(0, 95).text("Up/Dn L/R OK")
         else:
-            ctx.move_to(0, 94).text("OK to edit")
+            ctx.move_to(0, 95).text("OK to edit")
         ctx.restore()
 
     # --- online tide (EA flood-monitoring, UK; best-effort) ---------------
