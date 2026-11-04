@@ -277,6 +277,7 @@ class GPSClock(app.App):
         self._dst_on = False
         self._tz_base = 0
         self._editing = False    # SETUP tile edit mode
+        self._tide_edit = None   # Tide face: [field, day, hour, minute] while entering a high tide
         self._sel = 0            # selected menu item
 
         # tide online state
@@ -421,14 +422,35 @@ class GPSClock(app.App):
 
         if b.get(BUTTON_TYPES["CANCEL"]):
             b.clear()
-            if self._editing:
+            if self._tide_edit:
+                self._tide_edit = None           # leave the high-tide editor unchanged
+            elif self._editing:
                 self._editing = False            # leave the settings menu
             else:
                 self._leds_off()
                 self.minimise()
                 return
 
-        if self._editing:
+        if self._tide_edit:
+            # High-tide editor: Left/Right pick day/hour/minute, Up/Down change it, OK set
+            e = self._tide_edit
+            if b.get(BUTTON_TYPES["LEFT"]):
+                e[0] = (e[0] - 1) % 3; b.clear()
+            if b.get(BUTTON_TYPES["RIGHT"]):
+                e[0] = (e[0] + 1) % 3; b.clear()
+            for key, step in (("UP", 1), ("DOWN", -1)):
+                if b.get(BUTTON_TYPES[key]):
+                    if e[0] == 0:
+                        e[1] = max(-1, min(1, e[1] + step))
+                    elif e[0] == 1:
+                        e[2] = (e[2] + step) % 24
+                    else:
+                        e[3] = (e[3] + step) % 60
+                    b.clear()
+            if b.get(BUTTON_TYPES["CONFIRM"]):
+                self._set_high_tide(e[1], e[2], e[3])
+                self._tide_edit = None; b.clear()
+        elif self._editing:
             # Settings menu: Up/Down pick item, Left/Right change value, OK done
             n = len(self._menu_items())
             if b.get(BUTTON_TYPES["UP"]):
@@ -453,7 +475,7 @@ class GPSClock(app.App):
                 if FACES[self.face] == "info":
                     self._editing = True; self._sel = 0
                 elif FACES[self.face] == "tide":
-                    _set("gpsclock_tide_anchor", int(time.time()))
+                    self._tide_edit = self._tide_edit_start()
                 elif FACES[self.face] == "sky" and o.has_compass:
                     o.start_calibration()
                 b.clear()
@@ -466,6 +488,32 @@ class GPSClock(app.App):
 
         self._read_gps()
         self._update_leds()
+
+    # --- high tide entry --------------------------------------------------
+
+    def _tide_edit_start(self):
+        """Editor fields [field, day, hour, minute], starting at the last high tide
+        the clock predicts (local time), or now when it has none."""
+        now = time.time()
+        off = self._offset_seconds()
+        when = now
+        anchor = _get("gpsclock_tide_anchor")
+        if anchor is not None:
+            when = anchor + ((now - anchor) // TIDE_PERIOD) * TIDE_PERIOD
+        day = int((when + off) // 86400 - (now + off) // 86400)
+        if not -1 <= day <= 1:
+            when, day = now, 0
+        lt = time.localtime(int(when + off))
+        return [1, day, lt[3], lt[4]]
+
+    def _set_high_tide(self, day, hour, minute):
+        """Store a high tide at local hour:minute on today + day (-1, 0, +1)."""
+        off = self._offset_seconds()
+        now_local = int(time.time()) + off
+        midnight = now_local - now_local % 86400
+        _set("gpsclock_tide_anchor", midnight + day * 86400 + hour * 3600 + minute * 60 - off)
+        self._toast = "High tide set"
+        self._toast_ms = 1500
 
     def _menu_items(self):
         """Editable settings: (key, label, options, current_value)."""
@@ -716,7 +764,37 @@ class GPSClock(app.App):
 
     # --- tide face --------------------------------------------------------
 
+    def _draw_tide_edit(self, ctx):
+        field, day, hour, minute = self._tide_edit
+        ctx.save()
+        ctx.text_align = ctx.CENTER; ctx.text_baseline = ctx.MIDDLE
+        ctx.rgb(0.05, 0.09, 0.17)
+        ctx.begin_path(); ctx.arc(0, 0, FACE_R, 0, 2 * math.pi, False); ctx.fill()
+        ctx.rgb(0.62, 0.86, 1.0); ctx.font_size = 18
+        ctx.move_to(0, -72).text("High tide at")
+        sel = (1.0, 0.95, 0.4)
+        ctx.font_size = 20
+        ctx.rgb(*(sel if field == 0 else (0.9, 0.9, 0.9)))
+        ctx.move_to(0, -42).text(("Yesterday", "Today", "Tomorrow")[day + 1])
+        ctx.font_size = 44
+        for i, (x, val) in enumerate(((-34, hour), (34, minute))):
+            on = field == i + 1
+            if on:
+                ctx.rgb(0.16, 0.26, 0.42)
+                ctx.rectangle(x - 28, -22, 56, 44).fill()
+            ctx.rgb(*(sel if on else (0.95, 1.0, 1.0)))
+            ctx.move_to(x, 0).text("%02d" % val)
+        ctx.rgb(0.95, 1.0, 1.0)
+        ctx.move_to(0, -2).text(":")
+        ctx.font_size = 12; ctx.rgb(0.6, 0.7, 0.8)
+        ctx.move_to(0, 42).text("L/R field  Up/Dn change")
+        ctx.move_to(0, 58).text("OK set   F cancel")
+        ctx.restore()
+
     def _draw_tide(self, ctx):
+        if self._tide_edit:
+            self._draw_tide_edit(ctx)
+            return
         ctx.save()
         ctx.text_align = ctx.CENTER; ctx.text_baseline = ctx.MIDDLE
         anchor = _get("gpsclock_tide_anchor")
@@ -730,8 +808,8 @@ class GPSClock(app.App):
 
         if anchor is None and online is None:
             ctx.rgb(0.9, 0.9, 0.7); ctx.font_size = 17
-            ctx.move_to(0, -10).text("Press OK")
-            ctx.move_to(0, 14).text("at high tide")
+            ctx.move_to(0, -10).text("OK to enter")
+            ctx.move_to(0, 14).text("a high tide time")
             ctx.restore(); return
 
         now = time.time()

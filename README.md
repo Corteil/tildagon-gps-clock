@@ -41,7 +41,8 @@ The 12 edge **LEDs** show the time as a clock: **purple = hour**, **blue = minut
 * **Location:** taken from the GPS fix and cached, so sun/moon/tide keep working
   offline at your last known position.
 * **Tide (offline):** a classic tide-clock (12 h 25 m cycle) you calibrate once by
-  pressing **OK at high tide**; spring/neap is hinted from the moon phase.
+  entering the time of any known high tide (**OK** on the Tide face); spring/neap
+  is hinted from the moon phase.
 * **Tide (online, UK):** when WiFi is up, the nearest Environment Agency tide gauge
   is queried for live water level + trend, which also auto-calibrates the offline
   clock. Uses the EA real-time data API (Beta) — Open Government Licence; no key.
@@ -53,12 +54,16 @@ The 12 edge **LEDs** show the time as a clock: **purple = hour**, **blue = minut
 * **Left / Right** — change face.
 * **F / Cancel** — exit.
 * **A / Up** — hide or show the status ring.
-* **OK / Confirm** — on the **Tide** face, "set high tide now" (calibrate); on the
+* **OK / Confirm** — on the **Tide** face, enter a known high tide (see below); on the
   **Setup** tile, enter/leave edit mode; on the **Sky** face, calibrate the
   compass (tumble the badge slowly in every direction for 20 s, away from
   computers). GPS Info shares the calibration and the north trim.
 * **In the Setup menu:** **Up/Down** pick a setting, **Left/Right** change its value,
   **OK** done.
+* **Entering a high tide** (OK on the Tide face): **Left/Right** pick the day
+  (yesterday / today / tomorrow), hour or minute, **Up/Down** change it (hold to
+  repeat), **OK** set, **F** cancel. Use any high tide from a tide table, in local
+  time; it opens on the last high tide the clock predicts.
 
 ## Requirements
 
