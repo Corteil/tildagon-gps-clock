@@ -50,6 +50,10 @@ MON = ("JAN", "FEB", "MAR", "APR", "MAY", "JUN",
        "JUL", "AUG", "SEP", "OCT", "NOV", "DEC")
 
 TIDE_PERIOD = 12 * 3600 + 25.2 * 60      # mean semidiurnal tide period (s)
+TIDE_GAUGE_KM = 30                       # EA tide gauges searched within this distance
+TIDE_RESELECT_KM = 5                     # pick the gauge again after moving this far
+PORT_ADJ_KEY = "gpsclock_port_adj"       # minutes added to the gauge's high tide times
+PORT_ADJ_MAX = 120
 EA_BASE = "https://environment.data.gov.uk/flood-monitoring"
 EA_ATTRIB_1 = "EA real-time data"        # "EA real-time data API (Beta)", in two lines
 EA_ATTRIB_2 = "API (Beta)"                # so it fits inside the status ring
@@ -96,6 +100,13 @@ def parse_gsv(sentences):
             except ValueError:
                 continue
     return list(sats.values())
+
+
+def _km(lat1, lon1, lat2, lon2):
+    """Distance in km (equirectangular; fine over tens of km)."""
+    x = math.radians(lon2 - lon1) * math.cos(math.radians((lat1 + lat2) / 2))
+    y = math.radians(lat2 - lat1)
+    return 6371.0 * math.sqrt(x * x + y * y)
 
 
 def get_app_by_vid_pid_shim(vid, pid):
@@ -283,7 +294,9 @@ class GPSClock(app.App):
         # tide online state
         self._tide = None        # dict: value, units, trend, ... or None
         self._tide_fetch_ms = -999999
-        self._tide_station = _get("gpsclock_tide_station")
+        self._tide_station = _get("gpsclock_tide_station")        # EA measure id
+        self._tide_station_at = _get("gpsclock_tide_station_at")  # [lat, lon] it was picked from
+        self._tide_station_km = _get("gpsclock_tide_station_km")  # distance to the gauge
 
         # LEDs
         self._led_hm = None
@@ -524,6 +537,8 @@ class GPSClock(app.App):
              _get("gpsclock_tide_provider", "auto")),
             (orient.TRIM_KEY, "N trim", list(range(-orient.TRIM_MAX, orient.TRIM_MAX + 1)),
              self.orient.trim),
+            (PORT_ADJ_KEY, "Port adj", list(range(-PORT_ADJ_MAX, PORT_ADJ_MAX + 1, 5)),
+             _get(PORT_ADJ_KEY, 0)),
             ("gpsclock_ring", "Ring", ["on", "off"], _get("gpsclock_ring", "on")),
         ]
 
@@ -531,6 +546,9 @@ class GPSClock(app.App):
         key, label, opts, cur = self._menu_items()[self._sel]
         if key == orient.TRIM_KEY:                  # no wrap-around: -30 .. +30
             self.orient.set_trim(cur + delta)
+            return
+        if key == PORT_ADJ_KEY:                     # 5 min steps, no wrap-around
+            _set(key, max(-PORT_ADJ_MAX, min(PORT_ADJ_MAX, cur + 5 * delta)))
             return
         i = opts.index(cur) if cur in opts else 0
         _set(key, opts[(i + delta) % len(opts)])   # apply immediately and persist
@@ -800,7 +818,8 @@ class GPSClock(app.App):
         anchor = _get("gpsclock_tide_anchor")
         online = self._tide
         if online and online.get("last_high"):
-            anchor = online["last_high"]      # auto-calibrate from EA data
+            # auto-calibrate from the EA gauge, shifted to this port
+            anchor = online["last_high"] + _get(PORT_ADJ_KEY, 0) * 60
 
         # sky
         ctx.rgb(0.05, 0.09, 0.17)
@@ -860,7 +879,8 @@ class GPSClock(app.App):
                                                      int(nxt // 3600), int((nxt % 3600) // 60)))
         if online and online.get("value") is not None:
             ctx.font_size = 16; ctx.rgb(0.5, 1.0, 0.75)
-            ctx.move_to(0, 80).text("%.2f%s" % (online["value"], online.get("units", "m")))
+            gauge = " %dkm" % round(self._tide_station_km) if self._tide_station_km is not None else ""
+            ctx.move_to(0, 80).text("%.2f%s%s" % (online["value"], online.get("units", "m"), gauge))
             ctx.font_size = 9; ctx.rgb(0.45, 0.55, 0.65)
             ctx.move_to(0, 95).text(EA_ATTRIB_1)
             ctx.move_to(0, 105).text(EA_ATTRIB_2)
@@ -1000,9 +1020,12 @@ class GPSClock(app.App):
 
         # editable settings (cursor while editing)
         items = self._menu_items()
+        rows = 4                                  # what fits inside the ring; scroll the rest
+        first = max(0, min(self._sel - 1, len(items) - rows)) if self._editing else 0
         ctx.font_size = 14
         y = 4
-        for idx, (key, label, opts, cur) in enumerate(items):
+        for idx in range(first, min(len(items), first + rows)):
+            key, label, opts, cur = items[idx]
             sel = self._editing and idx == self._sel
             # row width follows the round screen, inside the status ring
             half = min(80, math.sqrt(108 * 108 - (abs(y) + 11) ** 2))
@@ -1013,7 +1036,13 @@ class GPSClock(app.App):
             ctx.rgb(0.65, 0.8, 1.0).move_to(-half + 14, y).text(label)
             ctx.text_align = ctx.RIGHT
             ctx.rgb(*((1.0, 0.95, 0.4) if sel else (0.92, 0.92, 0.92)))
-            ctx.move_to(half - 14, y).text("%+d°" % cur if key == orient.TRIM_KEY else str(cur))
+            if key == orient.TRIM_KEY:
+                val = "%+d°" % cur
+            elif key == PORT_ADJ_KEY:
+                val = "%+d min" % cur
+            else:
+                val = str(cur)
+            ctx.move_to(half - 14, y).text(val)
             if sel:
                 ctx.text_align = ctx.LEFT; ctx.rgb(1.0, 0.95, 0.4)
                 ctx.move_to(-half + 2, y).text("<")
@@ -1023,7 +1052,7 @@ class GPSClock(app.App):
 
         ctx.text_align = ctx.CENTER; ctx.font_size = 11; ctx.rgb(0.55, 0.6, 0.7)
         if self._editing:
-            ctx.move_to(0, 95).text("Up/Dn L/R OK")
+            ctx.move_to(0, 95).text("Up/Dn L/R OK  %d/%d" % (self._sel + 1, len(items)))
         else:
             ctx.move_to(0, 95).text("OK to edit")
         ctx.restore()
@@ -1084,12 +1113,18 @@ class GPSClock(app.App):
                 pass
 
     async def _maybe_fetch_tide(self):
-        if _get("gpsclock_tide_provider", "auto") == "offline" or self.lat is None:
+        if self.lat is None:
             return
+        # EA coverage is UK only; offline mode or leaving the UK drops the live data
+        if (_get("gpsclock_tide_provider", "auto") == "offline"
+                or not (49.0 < self.lat < 61.0 and -11.0 < self.lon < 2.5)):
+            self._tide = None
+            return
+        # Moved away from where the gauge was picked: pick the nearest one again
+        at = self._tide_station_at
+        if self._tide_station and (not at or _km(self.lat, self.lon, at[0], at[1]) > TIDE_RESELECT_KM):
+            self._forget_station()
         if self._tide and time.ticks_diff(time.ticks_ms(), self._tide_fetch_ms) < 15 * 60 * 1000:
-            return
-        # EA coverage is UK only
-        if not (49.0 < self.lat < 61.0 and -11.0 < self.lon < 2.5):
             return
         if not self._wifi_connected():
             return
@@ -1099,8 +1134,16 @@ class GPSClock(app.App):
             data = await async_helpers.unblock(self._fetch_tide_blocking)
         except Exception:
             data = None
-        if data:
+        if data == "none":
+            self._tide = None                 # no tide gauge near here
+        elif data:
             self._tide = data
+
+    def _forget_station(self):
+        self._tide_station = self._tide_station_at = self._tide_station_km = None
+        self._tide = None
+        for key in ("gpsclock_tide_station", "gpsclock_tide_station_at", "gpsclock_tide_station_km"):
+            _set(key, None)
 
     def _fetch_tide_blocking(self):
         try:
@@ -1113,14 +1156,17 @@ class GPSClock(app.App):
         try:
             measure = self._tide_station
             if not measure:
-                url = ("%s/id/stations?type=TideGauge&lat=%.4f&long=%.4f&dist=30&_limit=5"
-                       % (EA_BASE, self.lat, self.lon))
+                lat, lon = self.lat, self.lon
+                url = ("%s/id/stations?type=TideGauge&lat=%.4f&long=%.4f&dist=%d&_limit=10"
+                       % (EA_BASE, lat, lon, TIDE_GAUGE_KM))
                 r = requests.get(url); j = r.json(); r.close()
-                measure = self._pick_measure(j.get("items", []))
+                measure, km = self._pick_measure(j.get("items", []), lat, lon)
                 if not measure:
-                    return None
-                self._tide_station = measure
+                    return "none"
+                self._tide_station, self._tide_station_at, self._tide_station_km = measure, [lat, lon], km
                 _set("gpsclock_tide_station", measure)
+                _set("gpsclock_tide_station_at", [lat, lon])
+                _set("gpsclock_tide_station_km", km)
             url = "%s/id/measures/%s/readings?_sorted&_limit=24" % (EA_BASE, measure)
             r = requests.get(url); j = r.json(); r.close()
             cur, trend, hi, lo = parse_ea_readings(j.get("items", []))
@@ -1132,16 +1178,28 @@ class GPSClock(app.App):
             return None
 
     @staticmethod
-    def _pick_measure(stations):
+    def _pick_measure(stations, lat, lon):
+        """(tidal-level measure id, km) of the nearest gauge that has one, else (None, None)."""
+        best = (None, None)
         for s in stations:
             ms = s.get("measures")
             if isinstance(ms, dict):
                 ms = [ms]
+            mid = None
             for m in (ms or []):
-                mid = m.get("@id", "").split("/")[-1] if isinstance(m, dict) else str(m)
-                if "tidal_level" in mid:
-                    return mid
-        return None
+                m = m.get("@id", "").split("/")[-1] if isinstance(m, dict) else str(m)
+                if "tidal_level" in m:
+                    mid = m
+                    break
+            if not mid:
+                continue
+            try:
+                km = _km(lat, lon, float(s["lat"]), float(s["long"]))
+            except (KeyError, TypeError, ValueError):
+                km = TIDE_GAUGE_KM              # no position: rank it last
+            if best[1] is None or km < best[1]:
+                best = (mid, km)
+        return best
 
 
 __app_export__ = GPSClock # pylint: disable=invalid-name

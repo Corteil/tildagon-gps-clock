@@ -19,7 +19,8 @@ Cycle with **Left / Right** (it remembers the last clock face you used):
    mark for the way you point, and the heading), with a bubble level while the
    badge lies flat. Without a compass it stays North-up.
 6. **Setup** — status (time source, WiFi, GPS, offset, location) and editable
-   settings (timezone region, tide source, north trim, status ring on/off).
+   settings (timezone region, tide source, north trim, port adjustment, status
+   ring on/off). The list scrolls while editing.
 
 A thin **status ring** round the edge of the display shows the time source:
 **green** = GPS, **cyan** = NTP, **grey** = badge RTC only. Press **A** (Up)
@@ -44,8 +45,13 @@ The 12 edge **LEDs** show the time as a clock: **purple = hour**, **blue = minut
   entering the time of any known high tide (**OK** on the Tide face); spring/neap
   is hinted from the moon phase.
 * **Tide (online, UK):** when WiFi is up, the nearest Environment Agency tide gauge
-  is queried for live water level + trend, which also auto-calibrates the offline
-  clock. Uses the EA real-time data API (Beta) — Open Government Licence; no key.
+  within 30 km gives the live water level and trend (its distance shows next to
+  the level), and its last high tide auto-calibrates the tide clock. The gauge is
+  picked again after you move more than 5 km. A gauge can be some way from your
+  port, so **Port adj** in Setup (±120 min, 5 min steps) shifts the gauge's high
+  tide times to your spot, like a secondary-port correction in a tide table. It
+  is not applied to a high tide you enter yourself, which is taken as local.
+  Uses the EA real-time data API (Beta) — Open Government Licence; no key.
   *"this uses Environment Agency tide gauge data from the real-time data API (Beta)"*
 * **Settings** persist across power-off.
 
