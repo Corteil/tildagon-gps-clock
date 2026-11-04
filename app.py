@@ -495,8 +495,6 @@ class GPSClock(app.App):
             if b.get(BUTTON_TYPES["UP"]):           # A (or joystick up): toggle the status ring
                 ring = "off" if _get("gpsclock_ring", "on") == "on" else "on"
                 _set("gpsclock_ring", ring)
-                self._toast = "Ring " + ring
-                self._toast_ms = 1200
                 b.clear()
 
         self._read_gps()
