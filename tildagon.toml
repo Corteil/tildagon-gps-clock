@@ -21,7 +21,7 @@ license = "MIT"
 url = "https://github.com/Corteil/tildagon-gps-clock"
 
 # Description of your app.  Maximum 140 characters!
-description = "Retro GPS watch — analog, digital, sun/moon and tide faces for the round display, using the GPS Hexpansion."
+description = "Retro GPS watch — analog, digital, sun/moon, tide and compass sky faces for the round display, using the GPS Hexpansion."
 
 # Version number of your app.  Must be an integer!
-version = "2"
+version = "3"

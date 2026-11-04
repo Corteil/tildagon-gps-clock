@@ -14,8 +14,18 @@ Cycle with **Left / Right** (it remembers the last clock face you used):
 4. **Tide** — a **graphical tide wave** showing the water level, rising/falling and
    time to the next high/low. Offline by default; in the UK it shows **real water
    levels** from the Environment Agency when WiFi is available.
-5. **Setup** — status (time source, WiFi, GPS, offset, location) and editable
-   settings (timezone region, tide source).
+5. **Sky** — the satellites in view. With the 2026 front board's compass the
+   map turns to match the real sky (tilt-compensated; North in red, a yellow
+   mark for the way you point, and the heading), with a bubble level while the
+   badge lies flat. Without a compass it stays North-up.
+6. **Setup** — status (time source, WiFi, GPS, offset, location) and editable
+   settings (timezone region, tide source, north trim).
+
+A thin **status ring** round the edge of the display shows the time source:
+**green** = GPS, **cyan** = NTP, **grey** = badge RTC only.
+
+Stand the badge on any edge and every face turns so its bottom stays level
+(the LED clock turns with it).
 
 The 12 edge **LEDs** show the time as a clock: **purple = hour**, **blue = minute**,
 **white = second**.
@@ -42,7 +52,9 @@ The 12 edge **LEDs** show the time as a clock: **purple = hour**, **blue = minut
 * **Left / Right** — change face.
 * **F / Cancel** — exit.
 * **OK / Confirm** — on the **Tide** face, "set high tide now" (calibrate); on the
-  **Setup** tile, enter/leave edit mode.
+  **Setup** tile, enter/leave edit mode; on the **Sky** face, calibrate the
+  compass (tumble the badge slowly in every direction for 20 s, away from
+  computers). GPS Info shares the calibration and the north trim.
 * **In the Setup menu:** **Up/Down** pick a setting, **Left/Right** change its value,
   **OK** done.
 
@@ -61,12 +73,13 @@ Pre-built `.mpy` is committed; flash without `mpy-cross`. Find the port with
 mpremote connect COM13 fs mkdir :/apps/gps_clock ^
   + fs cp app.mpy   :/apps/gps_clock/app.mpy ^
   + fs cp astro.mpy :/apps/gps_clock/astro.mpy ^
+  + fs cp orient.mpy :/apps/gps_clock/orient.mpy ^
   + fs cp tildagon.toml :/apps/gps_clock/tildagon.toml ^
   + fs cp metadata.json :/apps/gps_clock/metadata.json
 ```
 
 Rebuild from source: `pip install mpy-cross` then
-`python -m mpy_cross app.py && python -m mpy_cross astro.py`.
+`python -m mpy_cross app.py && python -m mpy_cross astro.py && python -m mpy_cross orient.py`.
 
 ## Credits
 

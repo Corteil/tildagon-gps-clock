@@ -7,6 +7,9 @@ A retro multi-face watch driven by the GPS Hexpansion:
   * Sun/Moon - sunrise/sunset, day length and moon phase
   * Tide     - tide-clock dial; offline by default, real UK levels from the
                Environment Agency flood-monitoring API when WiFi is available.
+  * Sky      - satellites in view; turns with the compass on the 2026 front board.
+
+Standing the badge on an edge keeps every face's bottom level (orient.py).
 
 GPS time (from $..RMC) disciplines the badge RTC, so the clock keeps running
 without a fix; the last location is cached so sun/moon/tide still work offline.
@@ -28,18 +31,28 @@ from system.patterndisplay.events import PatternDisable, PatternEnable
 from system.scheduler.events import RequestForegroundPushEvent, RequestForegroundPopEvent
 
 from . import astro
+from . import orient
 
 GPS_VID = 0x7CAB
 GPS_PID = 0xBEAC
 
-FACES = ("analog", "digital", "sunmoon", "tide", "info")
+FACES = ("analog", "digital", "sunmoon", "tide", "sky", "info")
+SKY_R = 92              # sky face: radius of the horizon ring
+SKY_CARD_R = 102        # ... and of the N/E/S/W labels
+
+# Status ring round the edge: its colour is the time source. Faces stay inside
+# FACE_R; a band of background colour hides anything that pokes out.
+BG = (0.04, 0.05, 0.08)
+FACE_R = 112
+RING_R = 117
 DOW = ("MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN")
 MON = ("JAN", "FEB", "MAR", "APR", "MAY", "JUN",
        "JUL", "AUG", "SEP", "OCT", "NOV", "DEC")
 
 TIDE_PERIOD = 12 * 3600 + 25.2 * 60      # mean semidiurnal tide period (s)
 EA_BASE = "https://environment.data.gov.uk/flood-monitoring"
-EA_ATTRIB = "EA real-time data API (Beta)"
+EA_ATTRIB_1 = "EA real-time data"        # "EA real-time data API (Beta)", in two lines
+EA_ATTRIB_2 = "API (Beta)"                # so it fits inside the status ring
 
 # Indiglo-ish palette (vivid blue-green backlight, dark LCD segments)
 INDIGLO_BG = (0.10, 0.62, 0.54)
@@ -59,6 +72,30 @@ SEG = {
     "5": "acdfg", "6": "acdefg", "7": "abc", "8": "abcdefg", "9": "abcdfg",
     " ": "",
 }
+
+
+def sky_xy(azimuth, elevation, r_max=SKY_R):
+    """Azimuth/elevation -> x,y on the round screen (up = azimuth 0, clockwise)."""
+    el = 0 if elevation < 0 else (90 if elevation > 90 else elevation)
+    r = r_max * (90 - el) / 90
+    a = math.radians(azimuth)
+    return (r * math.sin(a), -r * math.cos(a))
+
+
+def parse_gsv(sentences):
+    """Satellites in view from the GSV sentences: [(azimuth, elevation, snr), ...]."""
+    sats = {}
+    for line in sentences:
+        p = line.split(",")
+        if len(p[0]) < 6 or p[0][3:6] != "GSV":
+            continue
+        for i in range(4, len(p) - 3, 4):
+            try:
+                if p[i]:
+                    sats[p[0][1:3] + p[i]] = (int(p[i + 2] or 0), int(p[i + 1] or 0), int(p[i + 3] or 0))
+            except ValueError:
+                continue
+    return list(sats.values())
 
 
 def get_app_by_vid_pid_shim(vid, pid):
@@ -250,6 +287,12 @@ class GPSClock(app.App):
         # LEDs
         self._led_hm = None
 
+        # Satellites in view (sky face), and the accelerometer + compass
+        self.sats = []
+        self.orient = orient.Orientation()
+        self._toast = ""
+        self._toast_ms = 0
+
         eventbus.on_async(RequestForegroundPushEvent, self._resume, self)
         eventbus.on_async(RequestForegroundPopEvent, self._pause, self)
         eventbus.on_async(HexpansionMountedEvent, self._mounted, self)
@@ -323,6 +366,8 @@ class GPSClock(app.App):
         sentences = getattr(self.gps, "sentences", None)
         if not sentences:
             return
+        if FACES[self.face] == "sky":
+            self.sats = parse_gsv(sentences)
         t = self._parse_rmc_time(sentences)
         if t:
             self._time_src = "gps"
@@ -358,6 +403,22 @@ class GPSClock(app.App):
 
     def update(self, delta):
         b = self.button_states
+        o = self.orient
+        o.update(delta)
+        if self._toast_ms > 0:
+            self._toast_ms -= delta
+        if o.calibrating:
+            # Tumbling the badge: only Cancel (abort) does anything
+            if b.get(BUTTON_TYPES["CANCEL"]):
+                o.cancel_calibration()
+            b.clear()
+            self._update_leds()
+            return
+        if o.cal_result:
+            self._toast = "Compass calibrated" if o.cal_result == "ok" else "Calibration failed"
+            self._toast_ms = 1800
+            o.cal_result = None
+
         if b.get(BUTTON_TYPES["CANCEL"]):
             b.clear()
             if self._editing:
@@ -393,6 +454,8 @@ class GPSClock(app.App):
                     self._editing = True; self._sel = 0
                 elif FACES[self.face] == "tide":
                     _set("gpsclock_tide_anchor", int(time.time()))
+                elif FACES[self.face] == "sky" and o.has_compass:
+                    o.start_calibration()
                 b.clear()
 
         self._read_gps()
@@ -405,10 +468,15 @@ class GPSClock(app.App):
              _get("gpsclock_region", REGIONS[0][0])),
             ("gpsclock_tide_provider", "Tide", ["auto", "offline"],
              _get("gpsclock_tide_provider", "auto")),
+            (orient.TRIM_KEY, "N trim", list(range(-orient.TRIM_MAX, orient.TRIM_MAX + 1)),
+             self.orient.trim),
         ]
 
     def _menu_change(self, delta):
         key, label, opts, cur = self._menu_items()[self._sel]
+        if key == orient.TRIM_KEY:                  # no wrap-around: -30 .. +30
+            self.orient.set_trim(cur + delta)
+            return
         i = opts.index(cur) if cur in opts else 0
         _set(key, opts[(i + delta) % len(opts)])   # apply immediately and persist
 
@@ -421,9 +489,11 @@ class GPSClock(app.App):
         hpos = lt[3] % 12                   # hour hand position (0-11)
         mpos = (lt[4] // 5) % 12            # minute hand position (5-min steps)
         spos = (lt[5] // 5) % 12            # second hand position (5-sec steps)
-        if (hpos, mpos, spos) == self._led_hm:
+        # Turn the ring with the levelled face, in whole LEDs (30 deg each)
+        turn = int(round(self.orient.rotation / (math.pi / 6))) % 12
+        if (hpos, mpos, spos, turn) == self._led_hm:
             return
-        self._led_hm = (hpos, mpos, spos)
+        self._led_hm = (hpos, mpos, spos, turn)
         try:
             for p in range(12):
                 if p == hpos and p == mpos:
@@ -436,7 +506,7 @@ class GPSClock(app.App):
                     c = LED_SECOND
                 else:
                     c = (0, 0, 0)
-                tildagonos.leds[((p + LED_OFFSET) % 12) + 1] = c
+                tildagonos.leds[((p + LED_OFFSET + turn) % 12) + 1] = c
             tildagonos.leds.write()
         except Exception:
             pass
@@ -453,7 +523,17 @@ class GPSClock(app.App):
     # --- draw -------------------------------------------------------------
 
     def draw(self, ctx):
-        ctx.rgb(0.04, 0.05, 0.08).rectangle(-120, -120, 240, 240).fill()
+        ctx.rgb(*BG).rectangle(-120, -120, 240, 240).fill()
+        ctx.save()
+        ctx.rotate(self.orient.rotation)         # keep the bottom level on an edge
+        self._draw_face(ctx)
+        ctx.restore()
+        self._draw_status_ring(ctx)
+
+    def _draw_face(self, ctx):
+        if self.orient.calibrating:
+            self._draw_calibration(ctx)
+            return
         f = FACES[self.face]
         if f == "analog":
             self._draw_analog(ctx)
@@ -463,22 +543,31 @@ class GPSClock(app.App):
             self._draw_sunmoon(ctx)
         elif f == "tide":
             self._draw_tide(ctx)
+        elif f == "sky":
+            self._draw_sky(ctx)
         else:
             self._draw_info(ctx)
-        self._draw_gps_pip(ctx)
+        if self._toast_ms > 0:
+            ctx.save()
+            ctx.text_align = ctx.CENTER; ctx.text_baseline = ctx.MIDDLE
+            ctx.font_size = 18
+            ctx.rgb(1.0, 0.85, 0.1).move_to(0, 62).text(self._toast)
+            ctx.restore()
 
-    def _draw_gps_pip(self, ctx):
-        ctx.save()
+    def _draw_status_ring(self, ctx):
         if self._time_src == "gps":
             col = (0.0, 1.0, 0.25)        # bright green = GPS time lock
         elif self._time_src == "net":
             col = (0.1, 0.75, 1.0)        # cyan = NTP network time
         else:
             col = (0.45, 0.45, 0.45)      # grey = RTC only
-        ctx.rgba(col[0], col[1], col[2], 0.35)
-        ctx.begin_path(); ctx.arc(0, -108, 9, 0, 2 * math.pi, False); ctx.fill()
+        ctx.save()
+        ctx.rgb(*BG)                      # clear the band between the face and the ring
+        ctx.line_width = 120 - FACE_R + 2
+        ctx.begin_path(); ctx.arc(0, 0, (120 + FACE_R) / 2 + 1, 0, 2 * math.pi, False); ctx.stroke()
         ctx.rgb(*col)
-        ctx.begin_path(); ctx.arc(0, -108, 5.5, 0, 2 * math.pi, False); ctx.fill()
+        ctx.line_width = 2.5
+        ctx.begin_path(); ctx.arc(0, 0, RING_R, 0, 2 * math.pi, False); ctx.stroke()
         ctx.restore()
 
     # --- analog face ------------------------------------------------------
@@ -489,18 +578,18 @@ class GPSClock(app.App):
         ctx.save()
         # dial
         ctx.rgb(0.93, 0.90, 0.82)
-        ctx.begin_path(); ctx.arc(0, 0, 112, 0, 2 * math.pi, False); ctx.fill()
+        ctx.begin_path(); ctx.arc(0, 0, 109, 0, 2 * math.pi, False); ctx.fill()
         ctx.rgb(0.12, 0.12, 0.12)
         ctx.line_width = 3
-        ctx.begin_path(); ctx.arc(0, 0, 112, 0, 2 * math.pi, False); ctx.stroke()
+        ctx.begin_path(); ctx.arc(0, 0, 109, 0, 2 * math.pi, False); ctx.stroke()
         # ticks
         for i in range(60):
             a = i / 60 * 2 * math.pi
-            r0 = 104 if i % 5 else 96
+            r0 = 101 if i % 5 else 93
             ctx.line_width = 3 if i % 5 == 0 else 1
             ctx.begin_path()
             ctx.move_to(math.sin(a) * r0, -math.cos(a) * r0)
-            ctx.line_to(math.sin(a) * 110, -math.cos(a) * 110)
+            ctx.line_to(math.sin(a) * 106, -math.cos(a) * 106)
             ctx.stroke()
         # date window
         ctx.text_align = ctx.CENTER; ctx.text_baseline = ctx.MIDDLE
@@ -530,7 +619,7 @@ class GPSClock(app.App):
         ctx.save()
         # backlit panel
         ctx.rgb(*INDIGLO_BG)
-        ctx.begin_path(); ctx.arc(0, 0, 116, 0, 2 * math.pi, False); ctx.fill()
+        ctx.begin_path(); ctx.arc(0, 0, FACE_R, 0, 2 * math.pi, False); ctx.fill()
         # HH:MM big
         w, h, gap, lw = 28, 46, 10, 6
         s = "%02d%02d" % (lt[3], lt[4])
@@ -629,7 +718,7 @@ class GPSClock(app.App):
 
         # sky
         ctx.rgb(0.05, 0.09, 0.17)
-        ctx.begin_path(); ctx.arc(0, 0, 118, 0, 2 * math.pi, False); ctx.fill()
+        ctx.begin_path(); ctx.arc(0, 0, FACE_R, 0, 2 * math.pi, False); ctx.fill()
 
         if anchor is None and online is None:
             ctx.rgb(0.9, 0.9, 0.7); ctx.font_size = 17
@@ -670,7 +759,7 @@ class GPSClock(app.App):
         # "now" marker
         ny = y0 - amp * hgt(0)
         ctx.rgba(1, 1, 1, 0.5); ctx.line_width = 1
-        ctx.begin_path(); ctx.move_to(0, ny); ctx.line_to(0, 116); ctx.stroke()
+        ctx.begin_path(); ctx.move_to(0, ny); ctx.line_to(0, FACE_R); ctx.stroke()
         ctx.rgb(1.0, 0.85, 0.2)
         ctx.begin_path(); ctx.arc(0, ny, 5, 0, 2 * math.pi, False); ctx.fill()
 
@@ -685,11 +774,101 @@ class GPSClock(app.App):
                                                      int(nxt // 3600), int((nxt % 3600) // 60)))
         if online and online.get("value") is not None:
             ctx.font_size = 16; ctx.rgb(0.5, 1.0, 0.75)
-            ctx.move_to(0, 96).text("%.2f%s" % (online["value"], online.get("units", "m")))
+            ctx.move_to(0, 80).text("%.2f%s" % (online["value"], online.get("units", "m")))
             ctx.font_size = 9; ctx.rgb(0.45, 0.55, 0.65)
-            ctx.move_to(0, 110).text(EA_ATTRIB)
+            ctx.move_to(0, 95).text(EA_ATTRIB_1)
+            ctx.move_to(0, 105).text(EA_ATTRIB_2)
         ctx.restore()
 
+
+    # --- sky face ---------------------------------------------------------
+
+    def _draw_sky(self, ctx):
+        o = self.orient
+        rot = o.heading if o.compass_ready else 0.0    # North up without a compass
+        ctx.save()
+        ctx.line_width = 2
+        for el in (0, 30, 60):
+            ctx.rgba(0.45, 0.50, 0.60, 0.9 if el == 0 else 0.4)
+            ctx.begin_path()
+            ctx.arc(0, 0, SKY_R * (90 - el) / 90, 0, 2 * math.pi, False)
+            ctx.stroke()
+        ctx.rgba(0.35, 0.40, 0.50, 0.4)
+        ctx.line_width = 1
+        ctx.begin_path()
+        for az in (0, 90):
+            x0, y0 = sky_xy(az - rot, 0)
+            ctx.move_to(x0, y0).line_to(-x0, -y0)
+        ctx.stroke()
+
+        ctx.text_align = ctx.CENTER; ctx.text_baseline = ctx.MIDDLE
+        ctx.font_size = 14
+        for label, az in (("N", 0), ("E", 90), ("S", 180), ("W", 270)):
+            x, y = sky_xy(az - rot, 0, SKY_CARD_R)
+            ctx.rgb(*((1.0, 0.3, 0.25) if label == "N" and o.compass_ready else (0.65, 0.70, 0.85)))
+            ctx.move_to(x, y).text(label)
+        if o.compass_ready:                       # lubber mark: the way the badge points
+            ctx.rgb(1.0, 0.85, 0.1)
+            ctx.begin_path()
+            ctx.move_to(0, -SKY_R + 1).line_to(-5, -SKY_R + 10).line_to(5, -SKY_R + 10)
+            ctx.close_path(); ctx.fill()
+
+        # Bubble level at the zenith while the badge lies near flat
+        if not o.upright and o.tilt < 30:
+            bx, by = o.level[0] * 60, o.level[1] * 60
+            d = math.sqrt(bx * bx + by * by)
+            if d > 14:
+                bx, by = bx * 14 / d, by * 14 / d
+            ctx.line_width = 1.5
+            ctx.rgba(0.8, 0.85, 0.95, 0.7)
+            ctx.begin_path(); ctx.arc(0, 0, 18, 0, 2 * math.pi, False); ctx.stroke()
+            ctx.rgba(*((0.2, 1.0, 0.4, 0.9) if o.tilt < 3 else (1.0, 0.75, 0.0, 0.9)))
+            ctx.begin_path(); ctx.arc(bx, by, 4, 0, 2 * math.pi, False); ctx.fill()
+
+        for az, el, snr in self.sats:
+            x, y = sky_xy(az - rot, el)
+            if snr <= 0:
+                col = (0.45, 0.45, 0.45)
+            elif snr < 20:
+                col = (0.93, 0.14, 0.0)
+            elif snr < 30:
+                col = (1.0, 0.75, 0.0)
+            else:
+                col = (0.0, 0.85, 0.3)
+            ctx.rgb(*col)
+            ctx.begin_path(); ctx.arc(x, y, 4 + min(4.0, snr / 12.0), 0, 2 * math.pi, False); ctx.fill()
+
+        ctx.font_size = 16; ctx.rgb(1, 1, 1)
+        if o.compass_ready:
+            ctx.move_to(0, -80).text("%03d°" % (int(o.heading + 0.5) % 360))
+        if self.gps is None:
+            msg = "no GPS"
+        else:
+            msg = "%d satellites" % len(self.sats)
+        ctx.move_to(0, 80).text(msg)
+        if o.has_compass and not o.calibrated:
+            ctx.font_size = 12; ctx.rgb(1.0, 0.75, 0.0)
+            ctx.move_to(0, 97).text("OK: calibrate compass")
+        ctx.restore()
+
+    def _draw_calibration(self, ctx):
+        ctx.save()
+        ctx.text_align = ctx.CENTER; ctx.text_baseline = ctx.MIDDLE
+        ctx.font_size = 22; ctx.rgb(1.0, 0.75, 0.0).move_to(0, -40).text("Compass")
+        ctx.font_size = 17; ctx.rgb(0.9, 0.9, 0.9)
+        ctx.move_to(0, -10).text("Tumble the badge")
+        ctx.move_to(0, 12).text("in every direction")
+        ctx.font_size = 13; ctx.rgb(0.6, 0.65, 0.75)
+        ctx.move_to(0, 40).text("away from computers")
+        ctx.move_to(0, 58).text("F to cancel")
+        ctx.line_width = 6
+        ctx.rgba(0.3, 0.35, 0.45, 0.6)
+        ctx.begin_path(); ctx.arc(0, 0, 108, 0, 2 * math.pi, False); ctx.stroke()
+        ctx.rgb(0.0, 0.85, 0.3)
+        ctx.begin_path()
+        ctx.arc(0, 0, 108, -math.pi / 2, -math.pi / 2 + 2 * math.pi * self.orient.cal_progress, False)
+        ctx.stroke()
+        ctx.restore()
 
     # --- setup / info tile ------------------------------------------------
 
@@ -728,34 +907,34 @@ class GPSClock(app.App):
                                 ("Offset", tz, (0.9, 0.9, 0.9)),
                                 ("Loc", loc, (0.82, 0.82, 0.86))):
             ctx.text_align = ctx.LEFT
-            ctx.rgb(0.5, 0.6, 0.8).move_to(-82, y).text(label)
+            ctx.rgb(0.5, 0.6, 0.8).move_to(-72, y).text(label)
             ctx.text_align = ctx.RIGHT
-            ctx.rgb(*col).move_to(82, y).text(val)
+            ctx.rgb(*col).move_to(72, y).text(val)
             y += 18
 
         # editable settings (cursor while editing)
         items = self._menu_items()
-        y = 16
+        y = 14
         for idx, (key, label, opts, cur) in enumerate(items):
             sel = self._editing and idx == self._sel
             if sel:
                 ctx.rgb(0.16, 0.26, 0.42)
-                ctx.rectangle(-94, y - 13, 188, 26).fill()
+                ctx.rectangle(-80, y - 12, 160, 24).fill()
             ctx.text_align = ctx.LEFT
             ctx.rgb(0.65, 0.8, 1.0).move_to(-78, y).text(label)
             ctx.text_align = ctx.RIGHT
             ctx.rgb(*((1.0, 0.95, 0.4) if sel else (0.92, 0.92, 0.92)))
-            ctx.move_to(78, y).text(str(cur))
+            ctx.move_to(78, y).text("%+d°" % cur if key == orient.TRIM_KEY else str(cur))
             if sel:
                 ctx.text_align = ctx.LEFT; ctx.rgb(1.0, 0.95, 0.4)
-                ctx.move_to(-92, y).text("<")
+                ctx.move_to(-84, y).text("<")
                 ctx.text_align = ctx.RIGHT
-                ctx.move_to(92, y).text(">")
-            y += 28
+                ctx.move_to(84, y).text(">")
+            y += 25
 
         ctx.text_align = ctx.CENTER; ctx.font_size = 11; ctx.rgb(0.55, 0.6, 0.7)
         if self._editing:
-            ctx.move_to(0, 94).text("Up/Dn pick   L/R change   OK done")
+            ctx.move_to(0, 94).text("U/D pick  L/R set  OK")
         else:
             ctx.move_to(0, 94).text("OK to edit")
         ctx.restore()
