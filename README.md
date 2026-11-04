@@ -22,8 +22,8 @@ Cycle with **Left / Right** (it remembers the last clock face you used):
    settings (timezone region, tide source, north trim, status ring on/off).
 
 A thin **status ring** round the edge of the display shows the time source:
-**green** = GPS, **cyan** = NTP, **grey** = badge RTC only. Turn it off with
-**Ring** in Setup.
+**green** = GPS, **cyan** = NTP, **grey** = badge RTC only. Press **OK** on
+the Analog, Digital or Sun/Moon face to hide or show it (or use **Ring** in Setup).
 
 Stand the badge on any edge and every face turns so its bottom stays level
 (the LED clock turns with it).
@@ -52,7 +52,8 @@ The 12 edge **LEDs** show the time as a clock: **purple = hour**, **blue = minut
 
 * **Left / Right** — change face.
 * **F / Cancel** — exit.
-* **OK / Confirm** — on the **Tide** face, "set high tide now" (calibrate); on the
+* **OK / Confirm** — on the **Analog**, **Digital** and **Sun/Moon** faces, hide or
+  show the status ring; on the **Tide** face, "set high tide now" (calibrate); on the
   **Setup** tile, enter/leave edit mode; on the **Sky** face, calibrate the
   compass (tumble the badge slowly in every direction for 20 s, away from
   computers). GPS Info shares the calibration and the north trim.
