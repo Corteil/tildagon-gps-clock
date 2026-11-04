@@ -454,14 +454,14 @@ class GPSClock(app.App):
                     self._editing = True; self._sel = 0
                 elif FACES[self.face] == "tide":
                     _set("gpsclock_tide_anchor", int(time.time()))
-                elif FACES[self.face] == "sky":
-                    if o.has_compass:
-                        o.start_calibration()
-                else:                               # clock faces: toggle the status ring
-                    ring = "off" if _get("gpsclock_ring", "on") == "on" else "on"
-                    _set("gpsclock_ring", ring)
-                    self._toast = "Ring " + ring
-                    self._toast_ms = 1200
+                elif FACES[self.face] == "sky" and o.has_compass:
+                    o.start_calibration()
+                b.clear()
+            if b.get(BUTTON_TYPES["UP"]):           # A (or joystick up): toggle the status ring
+                ring = "off" if _get("gpsclock_ring", "on") == "on" else "on"
+                _set("gpsclock_ring", ring)
+                self._toast = "Ring " + ring
+                self._toast_ms = 1200
                 b.clear()
 
         self._read_gps()
